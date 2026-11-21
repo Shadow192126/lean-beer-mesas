@@ -36,6 +36,9 @@ declare
   old_card jsonb;
   new_card jsonb;
   expired boolean;
+  feedback jsonb;
+  response jsonb;
+  additions int := 0;
 begin
   if next_state is null or octet_length(next_state::text) > 1000000 then
     raise exception 'La sesión excede el tamaño permitido';
@@ -44,6 +47,38 @@ begin
   if not found or previous.version <> expected then return false; end if;
 
   if sha256(convert_to(coalesce(host_key, ''), 'UTF8')) <> previous.host_hash then
+    if coalesce(previous.state->'closed','false'::jsonb) is distinct from coalesce(next_state->'closed','false'::jsonb) then
+      raise exception 'Solo el facilitador puede cerrar la sesión';
+    end if;
+    if previous.state->'closed' = 'true'::jsonb then
+      if (previous.state - 'tables') is distinct from (next_state - 'tables')
+         or (select array_agg(k order by k) from jsonb_object_keys(previous.state->'tables') k)
+            is distinct from (select array_agg(k order by k) from jsonb_object_keys(next_state->'tables') k) then
+        raise exception 'La sesión ya está cerrada';
+      end if;
+      for item in select * from jsonb_each(previous.state->'tables') loop
+        old_table := item.value;
+        new_table := next_state->'tables'->item.key;
+        feedback := coalesce(new_table->'feedback','{}'::jsonb);
+        if (old_table - 'feedback') is distinct from (new_table - 'feedback')
+           or jsonb_typeof(feedback) <> 'object'
+           or not (feedback @> coalesce(old_table->'feedback','{}'::jsonb)) then
+          raise exception 'Solo se pueden añadir evaluaciones después del cierre';
+        end if;
+        for response in select value from jsonb_each(feedback - array(select jsonb_object_keys(coalesce(old_table->'feedback','{}'::jsonb)))) loop
+          if jsonb_typeof(response->'plus') is distinct from 'string' or jsonb_typeof(response->'delta') is distinct from 'string'
+             or length(response->>'plus') > 2000 or length(response->>'delta') > 2000
+             or concat(trim(response->>'plus'),trim(response->>'delta')) = ''
+             or (response - array['plus','delta']) <> '{}'::jsonb then
+            raise exception 'Evaluación inválida';
+          end if;
+          additions := additions + 1;
+        end loop;
+      end loop;
+      if additions <> 1 then raise exception 'Envía una evaluación por vez'; end if;
+      update public.lb_sessions set state = next_state, version = version + 1 where id = room;
+      return true;
+    end if;
     if (select array_agg(k order by k) from jsonb_object_keys(previous.state->'tables') k)
         is distinct from
        (select array_agg(k order by k) from jsonb_object_keys(next_state->'tables') k) then
