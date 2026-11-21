@@ -6,7 +6,11 @@ Tablero colaborativo en español para sesiones Lean Beer con más de 20 particip
 
 Abre `index.html` en Brave. El modo demo guarda los cambios en ese navegador. Puedes abrir el panel maestro y un tablero en pestañas distintas. Excel necesita acceso al CDN de SheetJS. El cronómetro y el aviso sonoro requieren que la pestaña esté activa para escucharse de inmediato y que hayas interactuado con la página.
 
-## Activar la colaboración
+## Usar la versión publicada
+
+La [app en GitHub Pages](https://shadow192126.github.io/lean-beer-mesas/) ya está conectada a Supabase. Pulsa **Crear sesión colaborativa**, guarda el enlace del panel maestro y usa **Copiar enlace** para compartir cada mesa.
+
+## Configurar otro despliegue
 
 1. En tu proyecto de Supabase, ejecuta `supabase.sql` en SQL Editor.
 2. En `index.html`, completa `SUPABASE_URL` y `SUPABASE_PUBLISHABLE_KEY` con la URL y la clave publicable del proyecto. Nunca pongas una clave secreta de servicio en HTML.
