@@ -80,6 +80,16 @@ async function change(edit,host=false,background=false){
  finally{busy=false;}
 }
 const host=()=>!remote||Boolean(organizer);
+const feedbackRows=t=>Object.values(t.feedback||{});
+function feedbackForm(t){
+ const sent=t.feedback?.[uid];
+ return `<section class="panel"><h2>Evaluación Plus/Delta</h2>
+ <p>La sesión terminó. Cuéntanos qué funcionó y qué cambiarías para la próxima reunión.</p>
+ ${sent?`<p role="status">Tu evaluación fue enviada.</p><p><strong>Plus:</strong> ${clean(sent.plus||'—')}</p><p><strong>Delta:</strong> ${clean(sent.delta||'—')}</p>`:`<form id="feedback-form">
+ <label style="width:100%">Plus · ¿Qué funcionó bien?<textarea name="plus" maxlength="2000"></textarea></label>
+ <label style="width:100%">Delta · ¿Qué mejorarías en la próxima reunión?<textarea name="delta" maxlength="2000"></textarea></label>
+ <button class="primary">Enviar evaluación</button></form>`}</section>`;
+}
 const active=t=>t.cards.find(c=>c.stage==='doing');
 const score=c=>Object.values(c.votes).reduce((a,b)=>a+(Number(b)||0),0);
 const used=t=>t.cards.reduce((a,c)=>a+(c.votes[uid]||0),0);
@@ -102,15 +112,17 @@ function render(){
  if(!data)return;
  const view=el('view');
  const draft=document.activeElement;
- if(view.contains(draft)&&draft.matches('textarea,input'))return;
+ if(view.contains(draft)&&draft.matches('textarea,input')&&(!data.closed||draft.closest('#feedback-form')))return;
  if(admin||!table){
   view.innerHTML=`<h1>${admin?'Panel maestro':'Mesas de trabajo'}</h1><p>${admin?'Revisa el avance y consolida acuerdos por mesa.':'Elige una mesa para proponer, votar y discutir temas.'}</p>
-  <div class="row">${admin?btn('Descargar Markdown','md','','primary')+btn('Copiar Markdown','copy-md')+btn('Descargar Excel','xlsx')+(host()?btn('+ Mesa','add-table'):''):''}
+  <div class="row">${data.closed?'<span class="pill">Sesión cerrada · evaluación abierta</span>':''}${admin&&(!data.closed||host())?btn('Descargar Markdown','md','','primary')+btn('Copiar Markdown','copy-md')+btn('Descargar Excel','xlsx')+(host()&&!data.closed?btn('+ Mesa','add-table')+btn('Cerrar sesión y abrir evaluación','close-session'):''):''}
   ${!table&&SUPABASE_URL&&SUPABASE_PUBLISHABLE_KEY?btn('Crear sesión colaborativa','create'):''}</div>
-  <div class="grid">${Object.entries(data.tables).map(([id,t])=>`<section class="panel"><h2>Mesa ${clean(id)}</h2><p>${t.cards.filter(c=>c.stage==='done').length} concluidos · ${t.cards.filter(c=>c.stage==='todo').length} pendientes</p>${admin?`<p>${clean(active(t)?.title||'Sin discusión activa')}</p>`:''}<div class="actions"><a href="${clean(url({mesa:id},true))}">Abrir tablero</a>${btn('Copiar enlace','share','data-table="'+clean(id)+'"')}</div></section>`).join('')}</div>`;
+  <div class="grid">${Object.entries(data.tables).map(([id,t])=>`<section class="panel"><h2>Mesa ${clean(id)}</h2><p>${t.cards.filter(c=>c.stage==='done').length} concluidos · ${t.cards.filter(c=>c.stage==='todo').length} pendientes</p>${admin?`<p>${clean(active(t)?.title||'Sin discusión activa')}</p>`:''}<div class="actions"><a href="${clean(url({mesa:id},true))}">Abrir tablero</a>${btn(data.closed?'Copiar enlace de evaluación':'Copiar enlace','share','data-table="'+clean(id)+'"')}</div>
+ ${admin&&host()&&data.closed?`<p>${feedbackRows(t).length} evaluaciones</p>${feedbackRows(t).map(r=>`<article><p><strong>Plus:</strong> ${clean(r.plus||'—')}</p><p><strong>Delta:</strong> ${clean(r.delta||'—')}</p></article>`).join('')}`:''}</section>`).join('')}</div>`;
   return;
  }
  const t=data.tables[table];if(!t){view.innerHTML='<h1>Mesa no disponible</h1>';return;}
+ if(data.closed){el('roman').close();view.innerHTML=`<h1>Mesa ${clean(table)}</h1>`+feedbackForm(t);return;}
  view.innerHTML=`<h1>Mesa ${clean(table)}</h1><div class="row"><span class="pill">${Math.max(0,t.budget-used(t))}/${Number(t.budget)} votos disponibles</span><span class="pill" title="${clean(online(t).map(p=>p.avatar+' '+p.name).join(', '))}">${online(t).length} presentes</span>
  ${btn('Participantes','people')}${btn('Copiar enlace','share','data-table="'+clean(table)+'"')}</div>
  <div class="row toolbar"><div class="row"><output class="timer" id="timer">${clock(t)}</output><span class="muted">${t.end?'En curso':'Pausado'}</span></div><div class="actions">
@@ -143,7 +155,8 @@ function download(name,text){
 function report(){
  return Object.entries(data.tables).map(([id,t])=>({id,rows:[...t.cards].sort((a,b)=>score(b)-score(a)).map(c=>({Estado:stages[c.stage],Tema:c.title,Votos:score(c),Acuerdos:c.notes||(c.stage==='done'?'Pendiente de documentar':'')}))}));
 }
-const md = ()=>'# Acta Lean Beer\n\n'+report().map(({id,rows})=>'## Mesa '+id+'\n\n'+Object.values(stages).map(stage=>'### '+stage+'\n'+(rows.filter(r=>r.Estado===stage).map(r=>'- '+r.Tema.replace(/\n/g,' ')+' ('+r.Votos+' votos)'+(r.Acuerdos?'\n  - '+r.Acuerdos.replace(/\n/g,'\n    '):'')).join('\n')||'Sin temas.')+'\n').join('\n')).join('\n');
+const discussionMd = ()=>'# Acta Lean Beer\n\n'+report().map(({id,rows})=>'## Mesa '+id+'\n\n'+Object.values(stages).map(stage=>'### '+stage+'\n'+(rows.filter(r=>r.Estado===stage).map(r=>'- '+r.Tema.replace(/\n/g,' ')+' ('+r.Votos+' votos)'+(r.Acuerdos?'\n  - '+r.Acuerdos.replace(/\n/g,'\n    '):'')).join('\n')||'Sin temas.')+'\n').join('\n')).join('\n');
+const md=()=>discussionMd()+(data.closed?'\n\n## Evaluación Plus/Delta\n\n'+Object.entries(data.tables).map(([id,t])=>'### Mesa '+id+'\n'+(feedbackRows(t).map(r=>'- Plus: '+(r.plus||'—').replace(/\n/g,'\n  ')+'\n  Delta: '+(r.delta||'—').replace(/\n/g,'\n  ')).join('\n')||'Sin evaluaciones.')).join('\n\n'):'');
 document.addEventListener('click',async e=>{
  const b=e.target.closest('[data-action]');if(!b||!data)return;
  const {action,stage,delta,choice,min}=b.dataset;
@@ -155,12 +168,20 @@ document.addEventListener('click',async e=>{
  if(action==='xlsx'){
   if(!window.XLSX){tell('No se cargó el exportador de Excel. Puedes descargar Markdown.');return;}
   const wb=XLSX.utils.book_new();for(const r of report())XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(r.rows,{header:['Estado','Tema','Votos','Acuerdos']}),'Mesa '+r.id);
+  if(data.closed){
+   const feedback=Object.entries(data.tables).flatMap(([Mesa,t])=>feedbackRows(t).map(r=>({Mesa,Plus:r.plus,Delta:r.delta})));
+   XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(feedback,{header:['Mesa','Plus','Delta']}),'Evaluación Plus-Delta');
+  }
   XLSX.writeFile(wb,'acta-lean-beer.xlsx');return;
  }
  if(action==='create'){
   const room=crypto.randomUUID();const secret=crypto.randomUUID()+crypto.randomUUID();
   try{await rpc('lb_create',{room,host_key:secret,initial:empty()});location.href=url({admin:'true'},false,room)+'#facilitador='+secret;}
   catch(err){tell(err.message);}return;
+ }
+ if(action==='close-session'){
+  if(!confirm('¿Cerrar el tablero de todas las mesas y abrir la evaluación Plus/Delta?'))return;
+  return change(s=>{if(s.closed)return false;s.closed=true;},true);
  }
  if(action==='show-roman')return showBallot(t,true);
  if(action==='move')return change(s=>move(s,id,stage));
@@ -191,7 +212,16 @@ document.addEventListener('click',async e=>{
  },true);
 });
 document.addEventListener('submit',e=>{
- const f=e.target;if(f.id!=='new-topic'&&!f.matches('[data-notes]'))return;
+ const f=e.target;
+ if(f.id==='feedback-form'){
+  e.preventDefault();
+  const fields=new FormData(f),plus=fields.get('plus').trim(),delta=fields.get('delta').trim();
+  if(!plus&&!delta){tell('Escribe al menos un comentario en Plus o Delta.');return;}
+  document.activeElement?.blur();
+  change(s=>{if(!s.closed)return false;const t=s.tables[table];t.feedback??={};if(t.feedback[uid])return false;t.feedback[uid]={plus,delta};});
+  return;
+ }
+ if(f.id!=='new-topic'&&!f.matches('[data-notes]'))return;
  e.preventDefault();const fields=new FormData(f);const id=f.closest('[data-card]')?.dataset.card;const title=fields.get('title')?.trim();
  if(!id&&!title)return;
  document.activeElement?.blur();
@@ -211,14 +241,14 @@ document.addEventListener('dragstart',e=>{const card=e.target.closest('[data-car
 document.addEventListener('dragover',e=>{if(e.target.closest('[data-column]'))e.preventDefault();});
 document.addEventListener('drop',e=>{const col=e.target.closest('[data-column]');if(!col)return;e.preventDefault();change(s=>move(s,e.dataTransfer.getData('text/plain'),col.dataset.column));});
 async function presence(){
- if(!table||!data?.tables[table])return;
+ if(!table||data?.closed||!data?.tables[table])return;
  await change(s=>{const t=s.tables[table];const now=Date.now();t.people=Object.fromEntries(Object.entries(t.people).filter(([,p])=>now-p.seen<60000));t.people[uid]={...profile,seen:now};},false,true);
 }
 let expired=0,sound;
 document.addEventListener('pointerdown',()=>{try{sound ||= new AudioContext();if(sound.state==='suspended')sound.resume().catch(()=>{});}catch{}});
 function chime(){if(!sound||sound.state!=='running')return;const osc=sound.createOscillator(),gain=sound.createGain(),n=sound.currentTime;osc.frequency.value=740;gain.gain.setValueAtTime(.07,n);gain.gain.exponentialRampToValueAtTime(.001,n+.45);osc.connect(gain).connect(sound.destination);osc.start();osc.stop(n+.45);}
 function tick(){
- const t=data?.tables[table];if(!t)return;
+ const t=data?.tables[table];if(!t||data.closed)return;
  if(el('timer'))el('timer').textContent=clock(t);
  if(t.end&&remaining(t)===0){
   if(expired!==t.end){expired=t.end;chime();}
