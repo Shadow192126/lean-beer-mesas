@@ -10,6 +10,10 @@ Abre `index.html` en Brave. El modo demo guarda los cambios en ese navegador. Pu
 
 La [app en GitHub Pages](https://shadow192126.github.io/lean-beer-mesas/) ya está conectada a Supabase. Pulsa **Crear sesión colaborativa**, guarda el enlace del panel maestro y usa **Copiar enlace** para compartir cada mesa.
 
+## Evaluar la reunión con Plus/Delta
+
+En el Panel maestro, pulsa **Cerrar sesión y abrir evaluación** al terminar. Los enlaces de las mesas muestran el formulario de evaluación. Usa **Copiar enlace de evaluación** para reenviar el enlace a un grupo. Cada navegador puede enviar una respuesta por mesa, con un comentario sobre lo que funcionó y otro sobre lo que cambiaría. El Panel maestro agrupa las respuestas por mesa y las incluye en el acta Markdown y en una hoja del Excel.
+
 ## Configurar otro despliegue
 
 1. En tu proyecto de Supabase, ejecuta `supabase.sql` en SQL Editor.
