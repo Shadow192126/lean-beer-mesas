@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lean Beer · Mesas</title>
+<style>
+:root{color-scheme:dark;font:16px system-ui;background:#141512;color:#f7f0de;--gold:#fac66a;--border:#3b3b30;--panel:#20211b;--muted:#beb8a9}
+*{box-sizing:border-box}body{margin:0}header{border-bottom:1px solid var(--border)}nav,main{max-width:1280px;margin:auto;padding:20px 24px}nav,.row,form,.actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}nav strong{font-size:1.2rem;color:var(--gold);margin-right:auto}h1{font-size:clamp(2.2rem,5vw,4rem);letter-spacing:-.06em;margin:20px 0 8px}h2{font-size:1.15rem;margin:0}h3{margin:0 0 8px;overflow-wrap:anywhere}p{line-height:1.5;color:var(--muted)}button,input,select,textarea{font:inherit;border:1px solid var(--border);border-radius:8px;padding:9px 12px;background:#191a15;color:inherit}button{cursor:pointer}button:hover{border-color:var(--gold)}button:disabled{opacity:.45;cursor:default}.primary{background:var(--gold);color:#211707;font-weight:700}a{color:var(--gold)}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:18px}.panel,article,dialog{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:16px}.panel{min-width:0}article{background:#292921;margin-top:12px}.muted,small{color:var(--muted)}.pill{border:1px solid var(--border);border-radius:99px;padding:4px 10px;font-size:.85rem}.timer{font:700 2rem ui-monospace,monospace;color:var(--gold);min-width:6ch}.toolbar{justify-content:space-between;margin:18px 0}.card-title{display:flex;justify-content:space-between;gap:8px}textarea{width:100%;resize:vertical;min-height:75px;margin:8px 0}.danger{color:#ffb8a7}#message{min-height:1.5em;margin:8px 0}dialog{max-width:min(94vw,520px);color:inherit}dialog::backdrop{background:#000a}ol{padding-left:22px}.drop{outline:2px solid var(--gold)}@media(max-width:760px){.grid{grid-template-columns:1fr}main,nav{padding:14px}input{max-width:100%}}
+</style>
+</head>
+<body>
+<header><nav><strong>🍺 Lean Beer</strong><a id="home" href="?">Mesas</a><a id="master" href="?admin=true">Panel maestro</a><button id="profile"></button><span class="pill" id="mode">Conectando…</span></nav></header>
+<main><div id="view"></div><p id="message" role="status"></p></main>
+<dialog id="roman"><div id="ballot"></div><button id="hide-ballot">Volver al tablero</button></dialog>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<script>
+'use strict';
+const SUPABASE_URL = '';
+const SUPABASE_PUBLISHABLE_KEY = '';
+const params = new URLSearchParams(location.search);
+const session = params.get('sesion') || 'demo';
+const remote = Boolean(SUPABASE_URL && SUPABASE_PUBLISHABLE_KEY && params.has('sesion'));
+const table = params.get('mesa');
+const admin = params.get('admin') === 'true';
+const organizer = new URLSearchParams(location.hash.slice(1)).get('facilitador');
+const key = 'lean-beer:' + session;
+const stages = {todo:'Por discutir',doing:'Discutiendo',done:'Discutido'};
+const choices = {yes:'👍 Seguir',neutral:'✊ Me da igual',no:'👎 Pasar'};
+const uid = (localStorage.lbIdentity ||= crypto.randomUUID());
+let profile = JSON.parse(localStorage.lbProfile || '{"name":"Invitado","avatar":"🍺"}');
+let data, version, lastBallot, busy = false, lastError = '';
+const el = id => document.getElementById(id);
+const clean = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const empty = () => ({tables:Object.fromEntries([1,2,3,4].map(n=>[n,newTable()] ))});
+function newTable(){return {cards:[],remaining:300,end:0,budget:3,locked:false,movement:false,roman:null,people:{}};}
+function url(extra={},secret=false,id=session){
+ const u=new URL(location.href); u.search=new URLSearchParams(id === 'demo' && !params.has('sesion') ? extra : {sesion:id,...extra});
+ u.hash=secret&&organizer?'facilitador='+encodeURIComponent(organizer):'';return u.href;
+}
+function tell(msg=''){el('message').textContent=msg;}
+async function rpc(name,args){
+ const res=await fetch(SUPABASE_URL.replace(/\/$/,'')+'/rest/v1/rpc/'+name,{method:'POST',headers:{apikey:SUPABASE_PUBLISHABLE_KEY,'Content-Type':'application/json'},body:JSON.stringify(args)});
+ if(!res.ok)throw Error((await res.json().catch(()=>({}))).message||'No se pudo conectar con Supabase.');
+ return res.json();
+}
+async function read(){
+ if(remote){
+  const row=await rpc('lb_read',{room:session});
+  if(!row)throw Error('No se encontró la sesión. Pide el enlace al facilitador.');
+  return row;
+ }
+ return JSON.parse(localStorage.getItem(key)||'null')||{state:empty(),version:0};
+}
+async function refresh(){
+ if(busy)return;
+ try{
+  const row=await read();if(busy)return;
+  if(!data||version<row.version){data=row.state;version=row.version;render();}
+  el('mode').textContent=remote?'Sincronizado':'Demo · este navegador';
+  if(lastError){tell();lastError='';}
+ }catch(err){lastError=err.message;tell(lastError);el('mode').textContent='Sin conexión';}
+}
+async function change(edit,host=false,background=false){
+ if(busy){if(!background)tell('Hay un cambio en curso. Intenta de nuevo.');return;}
+ busy=true;
+ try{
+  if(host&&remote&&!organizer)throw Error('Se necesita el enlace del facilitador.');
+  for(let tries=0;tries<6;tries++){
+   const row=await read();const next=row.state;
+   if(edit(next)===false)break;
+   if(remote){
+    const updated=await rpc('lb_write',{room:session,expected:row.version,next_state:next,host_key:organizer});
+    if(!updated)continue;
+   }else{localStorage.setItem(key,JSON.stringify({state:next,version:row.version+1}));}
+   data=next;version=row.version+1;render();if(!background)tell('Guardado');return;
+  }
+  if(!background)tell('El cambio no se aplicó. Actualiza el tablero e inténtalo de nuevo.');
+ }catch(err){if(!background)tell(err.message);}
+ finally{busy=false;}
+}
+const host=()=>!remote||Boolean(organizer);
+const active=t=>t.cards.find(c=>c.stage==='doing');
+const score=c=>Object.values(c.votes).reduce((a,b)=>a+(Number(b)||0),0);
+const used=t=>t.cards.reduce((a,c)=>a+(c.votes[uid]||0),0);
+const remaining=t=>t.end?Math.max(0,Math.ceil((t.end-Date.now())/1000)):t.remaining;
+const clock=t=>[Math.floor(remaining(t)/60),remaining(t)%60].map(n=>String(n).padStart(2,'0')).join(':');
+const online=t=>Object.values(t.people).filter(p=>Date.now()-p.seen<45000);
+const btn=(label,action,extra='',cls='')=>`<button type="button" class="${cls}" data-action="${action}" ${extra}>${label}</button>`;
+function cards(t,stage){
+ let sorted=t.cards.filter(c=>c.stage===stage);
+ if(stage==='todo'&&t.sorted)sorted.sort((a,b)=>score(b)-score(a));
+ return sorted.map(c=>`<article data-card="${clean(c.id)}" draggable="${host()||t.movement}">
+ <div class="card-title"><h3>${clean(c.title)}</h3><span class="pill">${score(c)} 🍺</span></div><small>${clean(c.author)}</small>
+ ${stage==='todo'?`<div class="actions">${btn('−','vote','data-delta="-1" aria-label="Retirar voto" '+(t.locked||!c.votes[uid]?'disabled':''))}${btn('+','vote','data-delta="1" aria-label="Dar voto" '+(t.locked||used(t)>=t.budget?'disabled':''))}<small>Tus votos: ${Number(c.votes[uid])||0}</small></div>`:''}
+ ${stage==='doing'?`<form data-notes><textarea name="notes" maxlength="4000" aria-label="Acuerdos y conclusiones">${clean(c.notes)}</textarea><button>Guardar acuerdos</button></form>`:stage==='done'?`<p style="white-space:pre-wrap">${clean(c.notes||'Pendiente de documentar')}</p>`:''}
+ ${host()||t.movement?`<div class="actions">${stage!=='todo'?btn('Devolver a pendientes','move','data-stage="todo"'):''}${stage==='todo'?btn('Discutir','move','data-stage="doing"'):''}${stage==='doing'?btn('Concluir','move','data-stage="done"','primary'):''}</div>`:''}</article>`).join('')||'<p class="muted">Todavía no hay temas.</p>';
+}
+function render(){
+ el('profile').textContent=profile.avatar+' '+profile.name;
+ el('home').href=url({},true);el('master').href=url({admin:'true'},true);
+ if(!data)return;
+ const view=el('view');
+ const draft=document.activeElement;
+ if(view.contains(draft)&&draft.matches('textarea,input'))return;
+ if(admin||!table){
+  view.innerHTML=`<h1>${admin?'Panel maestro':'Mesas de trabajo'}</h1><p>${admin?'Revisa el avance y consolida acuerdos por mesa.':'Elige una mesa para proponer, votar y discutir temas.'}</p>
+  <div class="row">${admin?btn('Descargar Markdown','md','','primary')+btn('Copiar Markdown','copy-md')+btn('Descargar Excel','xlsx')+(host()?btn('+ Mesa','add-table'):''):''}
+  ${!table&&SUPABASE_URL&&SUPABASE_PUBLISHABLE_KEY?btn('Crear sesión colaborativa','create'):''}</div>
+  <div class="grid">${Object.entries(data.tables).map(([id,t])=>`<section class="panel"><h2>Mesa ${clean(id)}</h2><p>${t.cards.filter(c=>c.stage==='done').length} concluidos · ${t.cards.filter(c=>c.stage==='todo').length} pendientes</p>${admin?`<p>${clean(active(t)?.title||'Sin discusión activa')}</p>`:''}<div class="actions"><a href="${clean(url({mesa:id},true))}">Abrir tablero</a>${btn('Copiar enlace','share','data-table="'+clean(id)+'"')}</div></section>`).join('')}</div>`;
+  return;
+ }
+ const t=data.tables[table];if(!t){view.innerHTML='<h1>Mesa no disponible</h1>';return;}
+ view.innerHTML=`<h1>Mesa ${clean(table)}</h1><div class="row"><span class="pill">${Math.max(0,t.budget-used(t))}/${Number(t.budget)} votos disponibles</span><span class="pill" title="${clean(online(t).map(p=>p.avatar+' '+p.name).join(', '))}">${online(t).length} presentes</span>
+ ${btn('Participantes','people')}${btn('Copiar enlace','share','data-table="'+clean(table)+'"')}</div>
+ <div class="row toolbar"><div class="row"><output class="timer" id="timer">${clock(t)}</output><span class="muted">${t.end?'En curso':'Pausado'}</span></div><div class="actions">
+ ${host()?btn(t.end?'Pausar':'Iniciar','timer','','primary')+btn('Reiniciar 5 min','reset')+btn('+2 min','extend','data-min="2"')+btn('+3 min','extend','data-min="3"')+btn('+5 min','extend','data-min="5"')+btn('¿Seguimos?','roman'):t.roman?btn('¿Seguimos?','show-roman'):''}
+ </div></div>
+ <form id="new-topic"><input name="title" maxlength="120" required placeholder="Tema para la mesa" aria-label="Título del tema"><button class="primary">Añadir tema</button></form>
+ ${host()?`<div class="actions toolbar">${btn(t.locked?'Abrir votación':'Cerrar votación','lock')}${btn(t.sorted?'Orden original':'Ordenar por votos','sort')}${btn('Límite de votos','budget')}${btn(t.movement?'Restringir movimiento':'Permitir movimiento','movement')}</div>`:''}
+ <div class="grid">${Object.entries(stages).map(([stage,label])=>`<section class="panel" data-column="${stage}"><h2>${label} <small>· ${t.cards.filter(c=>c.stage===stage).length}</small></h2>${cards(t,stage)}</section>`).join('')}</div>`;
+ showBallot(t);
+}
+function showBallot(t,force=false){
+ if(!t.roman){el('roman').close();return;}
+ if(force||lastBallot!==t.roman.id){lastBallot=t.roman.id;if(!el('roman').open)el('roman').showModal();}
+ const votes=Object.values(t.roman.votes);
+ el('ballot').innerHTML=`<h2>¿Seguimos?</h2><p>${clean(active(t)?.title||'Discusión actual')}</p><p>${votes.length} votos registrados.</p><div class="actions">${Object.entries(choices).map(([k,label])=>btn(label+' · '+(votes.length?Math.round(100*votes.filter(v=>v===k).length/votes.length):0)+'%','ballot','data-choice="'+k+'" aria-pressed="'+(t.roman.votes[uid]===k)+'"')).join('')}</div>${host()?'<p>'+btn('Cerrar votación','close-roman')+'</p>':'<p></p>'}`;
+}
+function move(state,id,stage){
+ const t=state.tables[table];const c=t.cards.find(c=>c.id===id);
+ if(!c||(!host()&&!t.movement)||c.stage===stage)return false;
+ if(stage==='doing'&&active(t))throw Error('Concluye o devuelve el tema activo antes de iniciar otro.');
+ if(stage==='done'&&c.stage!=='doing')throw Error('Primero mueve el tema a Discutiendo.');
+ if(c.stage==='doing'||stage==='doing'){t.end=0;t.remaining=300;t.roman=null;}
+ c.stage=stage;
+}
+const openRoman=t=>{t.roman={id:crypto.randomUUID(),votes:{}};};
+function copy(value){return navigator.clipboard.writeText(value).then(()=>tell('Copiado')).catch(()=>tell('El navegador no pudo copiar el contenido.'));}
+function download(name,text){
+ const link=document.createElement('a');link.href=URL.createObjectURL(new Blob([text],{type:'text/markdown;charset=utf-8'}));link.download=name;link.click();setTimeout(()=>URL.revokeObjectURL(link.href),2000);
+}
+function report(){
+ return Object.entries(data.tables).map(([id,t])=>({id,rows:[...t.cards].sort((a,b)=>score(b)-score(a)).map(c=>({Estado:stages[c.stage],Tema:c.title,Votos:score(c),Acuerdos:c.notes||(c.stage==='done'?'Pendiente de documentar':'')}))}));
+}
+const md = ()=>'# Acta Lean Beer\n\n'+report().map(({id,rows})=>'## Mesa '+id+'\n\n'+Object.values(stages).map(stage=>'### '+stage+'\n'+(rows.filter(r=>r.Estado===stage).map(r=>'- '+r.Tema.replace(/\n/g,' ')+' ('+r.Votos+' votos)'+(r.Acuerdos?'\n  - '+r.Acuerdos.replace(/\n/g,'\n    '):'')).join('\n')||'Sin temas.')+'\n').join('\n')).join('\n');
+document.addEventListener('click',async e=>{
+ const b=e.target.closest('[data-action]');if(!b||!data)return;
+ const {action,stage,delta,choice,min}=b.dataset;
+ const t=data.tables[table];const id=b.closest('[data-card]')?.dataset.card;
+ if(action==='share')return copy(url({mesa:b.dataset.table}));
+ if(action==='people'){tell(online(t).map(p=>p.avatar+' '+p.name).join(' · ')||'Aún no hay participantes registrados.');return;}
+ if(action==='md')return download('acta-lean-beer.md',md());
+ if(action==='copy-md')return copy(md());
+ if(action==='xlsx'){
+  if(!window.XLSX){tell('No se cargó el exportador de Excel. Puedes descargar Markdown.');return;}
+  const wb=XLSX.utils.book_new();for(const r of report())XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(r.rows,{header:['Estado','Tema','Votos','Acuerdos']}),'Mesa '+r.id);
+  XLSX.writeFile(wb,'acta-lean-beer.xlsx');return;
+ }
+ if(action==='create'){
+  const room=crypto.randomUUID();const secret=crypto.randomUUID()+crypto.randomUUID();
+  try{await rpc('lb_create',{room,host_key:secret,initial:empty()});location.href=url({admin:'true'},false,room)+'#facilitador='+secret;}
+  catch(err){tell(err.message);}return;
+ }
+ if(action==='show-roman')return showBallot(t,true);
+ if(action==='move')return change(s=>move(s,id,stage));
+ if(action==='add-table')return change(s=>{if(Object.keys(s.tables).length>=24)throw Error('Límite de 24 mesas.');s.tables[Object.keys(s.tables).length+1]=newTable();},true);
+ if(action==='vote')return change(s=>{
+  const room=s.tables[table],c=room.cards.find(c=>c.id===id);
+  if(!c||c.stage!=='todo'||room.locked)return false;
+  const n=(c.votes[uid]||0)+Number(delta);if(n<0||(Number(delta)>0&&used(room)>=room.budget))return false;
+  if(n)c.votes[uid]=n;else delete c.votes[uid];
+ });
+ if(action==='ballot')return change(s=>{const r=s.tables[table].roman;if(!r||r.id!==t.roman?.id)return false;r.votes[uid]=choice;});
+ const limit=action==='budget'?Number(prompt('Votos por participante (1–20)',t.budget)):0;
+ if(action==='budget'&&(!Number.isInteger(limit)||limit<1||limit>20))return;
+ return change(s=>{
+  const r=s.tables[table];
+  switch(action){
+   case 'timer': if(!active(r))throw Error('Primero mueve un tema a Discutiendo.');if(r.end){r.remaining=remaining(r);r.end=0;}else{r.end=Date.now()+(r.remaining||300)*1000;r.roman=null;}break;
+   case 'reset':r.end=0;r.remaining=300;r.roman=null;break;
+   case 'extend':if(r.end)r.end+=Number(min)*60000;else r.remaining+=Number(min)*60;break;
+   case 'roman':if(!active(r))throw Error('Primero inicia una discusión.');r.end=0;r.remaining=0;openRoman(r);break;
+   case 'close-roman':r.roman=null;break;
+   case 'lock':r.locked=!r.locked;break;
+   case 'sort':r.sorted=!r.sorted;break;
+   case 'movement':r.movement=!r.movement;break;
+   case 'budget':r.budget=limit;break;
+   default:return false;
+  }
+ },true);
+});
+document.addEventListener('submit',e=>{
+ const f=e.target;if(f.id!=='new-topic'&&!f.matches('[data-notes]'))return;
+ e.preventDefault();const fields=new FormData(f);const id=f.closest('[data-card]')?.dataset.card;const title=fields.get('title')?.trim();
+ if(!id&&!title)return;
+ document.activeElement?.blur();
+ change(s=>{
+  const t=s.tables[table];
+  if(id){const c=t.cards.find(c=>c.id===id&&c.stage==='doing');if(!c)return false;c.notes=fields.get('notes').trim();}
+  else t.cards.push({id:crypto.randomUUID(),title,author:profile.name,stage:'todo',notes:'',votes:{}});
+ });
+});
+el('profile').onclick=()=>{
+ const name=prompt('Nombre o apodo',profile.name)?.trim().slice(0,40);if(!name)return;
+ const avatar=prompt('Emoji del avatar',profile.avatar)?.trim().slice(0,12)||'🍺';
+ profile={name,avatar};localStorage.lbProfile=JSON.stringify(profile);render();presence();
+};
+el('hide-ballot').onclick=()=>el('roman').close();
+document.addEventListener('dragstart',e=>{const card=e.target.closest('[data-card][draggable="true"]');if(card)e.dataTransfer.setData('text/plain',card.dataset.card);});
+document.addEventListener('dragover',e=>{if(e.target.closest('[data-column]'))e.preventDefault();});
+document.addEventListener('drop',e=>{const col=e.target.closest('[data-column]');if(!col)return;e.preventDefault();change(s=>move(s,e.dataTransfer.getData('text/plain'),col.dataset.column));});
+async function presence(){
+ if(!table||!data?.tables[table])return;
+ await change(s=>{const t=s.tables[table];const now=Date.now();t.people=Object.fromEntries(Object.entries(t.people).filter(([,p])=>now-p.seen<60000));t.people[uid]={...profile,seen:now};},false,true);
+}
+let expired=0,sound;
+document.addEventListener('pointerdown',()=>{try{sound ||= new AudioContext();if(sound.state==='suspended')sound.resume().catch(()=>{});}catch{}});
+function chime(){if(!sound||sound.state!=='running')return;const osc=sound.createOscillator(),gain=sound.createGain(),n=sound.currentTime;osc.frequency.value=740;gain.gain.setValueAtTime(.07,n);gain.gain.exponentialRampToValueAtTime(.001,n+.45);osc.connect(gain).connect(sound.destination);osc.start();osc.stop(n+.45);}
+function tick(){
+ const t=data?.tables[table];if(!t)return;
+ if(el('timer'))el('timer').textContent=clock(t);
+ if(t.end&&remaining(t)===0){
+  if(expired!==t.end){expired=t.end;chime();}
+  change(s=>{const r=s.tables[table];if(!r.end||remaining(r)>0)return false;r.end=0;r.remaining=0;openRoman(r);},false,true);
+ }
+}
+el('profile').textContent=profile.avatar+' '+profile.name;
+refresh().then(presence);
+setInterval(refresh,1800);setInterval(tick,500);setInterval(presence,15000);
+el('view').addEventListener('focusout',()=>setTimeout(()=>{if(!busy&&!el('view').contains(document.activeElement))render();},0));
+window.addEventListener('storage',e=>{if(e.key===key)refresh();});
+</script>
+</body></html>
