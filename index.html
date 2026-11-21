@@ -16,8 +16,8 @@
 <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 <script>
 'use strict';
-const SUPABASE_URL = '';
-const SUPABASE_PUBLISHABLE_KEY = '';
+const SUPABASE_URL = 'https://nqpognrpjfeikkkyhfpz.supabase.co';
+const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_ZJlbfILsFFsht4ymuVTeHg_038BNa70';
 const params = new URLSearchParams(location.search);
 const session = params.get('sesion') || 'demo';
 const remote = Boolean(SUPABASE_URL && SUPABASE_PUBLISHABLE_KEY && params.has('sesion'));
